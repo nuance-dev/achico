@@ -498,24 +498,49 @@ class FileProcessor: ObservableObject {
     // MARK: - Private Methods - Helper Functions
     private func compressPDFPage(_ page: PDFPage) throws -> PDFPage? {
         let pageRect = page.bounds(for: .mediaBox)
-        
-        let image = NSImage(size: pageRect.size)
-        image.lockFocus()
-        if let context = NSGraphicsContext.current?.cgContext {
-            page.draw(with: .mediaBox, to: context)
-        }
-        image.unlockFocus()
-        
-        guard let tiffData = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiffData),
-              let compressedData = bitmap.representation(
-                using: .jpeg,
-                properties: [.compressionFactor: 0.5]
-              ),
-              let compressedImage = NSImage(data: compressedData) else {
+        let scale: CGFloat = 2.0
+        let width = Int((pageRect.width * scale).rounded())
+        let height = Int((pageRect.height * scale).rounded())
+        guard width > 0, height > 0 else { return nil }
+
+        // Render into an explicit CPU bitmap context: NSImage.lockFocus goes through
+        // a Metal conversion path that trips Metal API validation in debug builds.
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+              ) else {
             return nil
         }
-        
+
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.scaleBy(x: scale, y: scale)
+        context.translateBy(x: -pageRect.origin.x, y: -pageRect.origin.y)
+        page.draw(with: .mediaBox, to: context)
+
+        guard let cgImage = context.makeImage() else { return nil }
+
+        let jpegData = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            jpegData, UTType.jpeg.identifier as CFString, 1, nil
+        ) else {
+            return nil
+        }
+        CGImageDestinationAddImage(destination, cgImage, [
+            kCGImageDestinationLossyCompressionQuality: 0.5
+        ] as CFDictionary)
+        guard CGImageDestinationFinalize(destination),
+              let compressedImage = NSImage(data: jpegData as Data) else {
+            return nil
+        }
+        compressedImage.size = pageRect.size
+
         return PDFPage(image: compressedImage)
     }
     
